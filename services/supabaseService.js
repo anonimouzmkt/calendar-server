@@ -403,6 +403,29 @@ async function updateAppointmentWithGoogleEventId(appointmentId, googleEventId, 
   }
 }
 
+/**
+ * ✅ NOVO: Buscar appointments que têm google_event_id (para verificar órfãos)
+ */
+async function getAppointmentsWithGoogleEventId(companyId, googleCalendarId) {
+  try {
+    const { data, error } = await supabase
+      .from('appointments')
+      .select('id, title, google_event_id, created_at')
+      .eq('company_id', companyId)
+      .eq('google_calendar_id', googleCalendarId)
+      .not('google_event_id', 'is', null)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: false })
+      .limit(100); // Limitar a 100 para não sobrecarregar
+
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    logger.error('❌ Erro ao buscar appointments com google_event_id:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   supabase,
   getActiveGoogleCalendarIntegrations,
@@ -417,5 +440,6 @@ module.exports = {
   cancelAppointment,
   testConnection,
   getOrphanAppointments,
-  updateAppointmentWithGoogleEventId
+  updateAppointmentWithGoogleEventId,
+  getAppointmentsWithGoogleEventId
 }; 
