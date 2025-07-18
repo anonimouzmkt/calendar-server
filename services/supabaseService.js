@@ -350,6 +350,59 @@ async function testConnection() {
   }
 }
 
+/**
+ * ✅ NOVO: Buscar appointments órfãos (sem google_event_id)
+ */
+async function getOrphanAppointments(companyId, googleCalendarId) {
+  try {
+    const { data, error } = await supabase
+      .from('appointments')
+      .select('*')
+      .eq('company_id', companyId)
+      .eq('google_calendar_id', googleCalendarId)
+      .is('google_event_id', null)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    logger.error('❌ Erro ao buscar appointments órfãos:', error);
+    throw error;
+  }
+}
+
+/**
+ * ✅ NOVO: Atualizar appointment com google_event_id
+ */
+async function updateAppointmentWithGoogleEventId(appointmentId, googleEventId, googleMeetLink = null) {
+  try {
+    const updateData = {
+      google_event_id: googleEventId,
+      updated_at: new Date().toISOString()
+    };
+
+    if (googleMeetLink) {
+      updateData.google_meet_link = googleMeetLink;
+    }
+
+    const { error } = await supabase
+      .from('appointments')
+      .update(updateData)
+      .eq('id', appointmentId);
+
+    if (error) throw error;
+    
+    logger.debug('✅ Appointment atualizado com google_event_id', { 
+      appointmentId, 
+      googleEventId 
+    });
+  } catch (error) {
+    logger.error('❌ Erro ao atualizar appointment com google_event_id:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   supabase,
   getActiveGoogleCalendarIntegrations,
@@ -362,5 +415,7 @@ module.exports = {
   updateAppointment,
   getAppointmentByGoogleEventId,
   cancelAppointment,
-  testConnection
+  testConnection,
+  getOrphanAppointments,
+  updateAppointmentWithGoogleEventId
 }; 
