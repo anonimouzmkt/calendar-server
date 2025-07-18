@@ -168,13 +168,13 @@ class GoogleCalendarSyncService {
   async syncLocalAppointmentsToGoogle(integration, accessToken) {
     try {
       // Buscar appointments que não tem google_event_id (não sincronizados)
-      const orphanAppointments = await getUnsyncedLocalAppointments(
+      const unsyncedAppointments = await getUnsyncedLocalAppointments(
         integration.company_id, 
         integration.calendar_id
       );
       
-      if (orphanAppointments.length === 0) {
-        logger.info('✅ Nenhum appointment órfão local encontrado (todos já sincronizados)', { 
+      if (unsyncedAppointments.length === 0) {
+        logger.info('✅ Nenhum appointment local não sincronizado encontrado (todos já tem google_event_id)', { 
           operation: 'SYNC_LOCAL_TO_GOOGLE_COMPLETE',
           companyId: integration.company_id,
           calendarId: integration.calendar_id 
@@ -182,14 +182,14 @@ class GoogleCalendarSyncService {
         return;
       }
 
-      logger.info(`📝 Encontrados ${orphanAppointments.length} appointment(s) local(is) NÃO sincronizado(s)`, {
+      logger.info(`📝 Encontrados ${unsyncedAppointments.length} appointment(s) local(is) NÃO sincronizado(s)`, {
         operation: 'SYNC_LOCAL_TO_GOOGLE_START',
-        orphanCount: orphanAppointments.length,
+        unsyncedCount: unsyncedAppointments.length,
         companyId: integration.company_id,
         calendarName: integration.calendar_name || integration.calendar_id
       });
 
-      for (const appointment of orphanAppointments) {
+      for (const appointment of unsyncedAppointments) {
         try {
           // Criar evento no Google Calendar
           const googleEvent = await this.createGoogleEvent(appointment, integration, accessToken);
