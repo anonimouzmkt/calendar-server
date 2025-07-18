@@ -407,20 +407,27 @@ async function updateAppointmentWithGoogleEventId(appointmentId, googleEventId, 
 /**
  * ✅ NOVO: Buscar appointments sincronizados (com google_event_id)
  * Estes podem estar órfãos se o evento foi deletado no Google Calendar
+ * Busca TODOS os appointments da empresa com google_event_id, independente da agenda
  */
-async function getSyncedAppointments(companyId, googleCalendarId) {
+async function getSyncedAppointments(companyId, googleCalendarId = null) {
   try {
     const { data, error } = await supabase
       .from('appointments')
-      .select('id, title, google_event_id, created_at')
+      .select('id, title, google_event_id, google_calendar_id, created_at')
       .eq('company_id', companyId)
-      .eq('google_calendar_id', googleCalendarId)
       .not('google_event_id', 'is', null)
       .neq('status', 'cancelled')
       .order('created_at', { ascending: false })
       .limit(100); // Limitar a 100 para não sobrecarregar
 
     if (error) throw error;
+    
+    logger.debug(`🔍 Encontrados ${data?.length || 0} appointments com google_event_id para verificar órfãos`, {
+      companyId,
+      foundAppointments: data?.length || 0,
+      explanation: 'Busca TODOS os appointments da empresa com google_event_id (independente da agenda)'
+    });
+    
     return data || [];
   } catch (error) {
     logger.error('❌ Erro ao buscar appointments sincronizados:', error);
