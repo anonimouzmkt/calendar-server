@@ -368,10 +368,10 @@ class GoogleCalendarSyncService {
       // Verificar cada appointment no Google Calendar
       for (const appointment of appointmentsWithGoogleId) {
         try {
-          // Tentar buscar o evento no Google Calendar
+          // Tentar buscar o evento no Google Calendar usando a agenda específica do appointment
           const eventExists = await this.checkGoogleEventExists(
             appointment.google_event_id, 
-            integration.calendar_id, 
+            appointment.google_calendar_id || integration.calendar_id, 
             accessToken
           );
           
@@ -384,6 +384,7 @@ class GoogleCalendarSyncService {
               operation: 'ORPHAN_CLEANUP',
               appointmentId: appointment.id,
               googleEventId: appointment.google_event_id,
+              googleCalendarId: appointment.google_calendar_id,
               title: appointment.title,
               createdAt: appointment.created_at,
               reason: 'Evento não existe mais no Google Calendar (404/410)',
@@ -397,6 +398,7 @@ class GoogleCalendarSyncService {
           logger.error(`❌ Erro ao verificar appointment órfão`, { 
             appointmentId: appointment.id,
             googleEventId: appointment.google_event_id,
+            googleCalendarId: appointment.google_calendar_id,
             error: error.message 
           });
           // Continuar com os próximos appointments
