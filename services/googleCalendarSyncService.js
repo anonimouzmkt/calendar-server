@@ -208,18 +208,21 @@ class GoogleCalendarSyncService {
   buildSyncParams(integration) {
     const params = new URLSearchParams({
       singleEvents: 'true',
-      orderBy: 'startTime',
-      timeMin: new Date().toISOString(),
       maxResults: '250'
     });
 
     // Usar sync token se disponível para sincronização incremental
     if (integration.sync_token) {
+      // ✅ COM sync_token: Não usar timeMin - o token controla tudo
       params.set('syncToken', integration.sync_token);
     } else {
-      // Se não tem sync token, buscar eventos dos últimos 30 dias
+      // ✅ SEM sync_token: Buscar período amplo (30 dias atrás até 1 ano futuro)
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const oneYearFromNow = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+      
+      params.set('orderBy', 'startTime'); // Só para primeira sync
       params.set('timeMin', thirtyDaysAgo.toISOString());
+      params.set('timeMax', oneYearFromNow.toISOString());
     }
 
     return params;
