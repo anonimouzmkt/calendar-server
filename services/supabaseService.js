@@ -149,10 +149,48 @@ async function markIntegrationAsError(integrationId, errorMessage) {
 }
 
 /**
- * Criar appointment no banco de dados
+ * Buscar usuário admin/owner da empresa para usar como created_by
+ */
+async function getCompanyAdminUser(companyId) {
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('id')
+      .eq('company_id', companyId)
+      .or('is_owner.eq.true,is_admin.eq.true')
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    return data?.id || null;
+  } catch (error) {
+    logger.error('❌ Erro ao buscar admin da empresa:', error);
+    return null;
+  }
+}
+
+/**
+ * Criar appointment no banco de dados (com upsert)
  */
 async function createAppointment(appointmentData) {
   try {
+    // Se não tem created_by, buscar admin da empresa
+    if (!appointmentData.created_by) {
+      const adminUserId = await getCompanyAdminUser(appointmentData.company_id);
+      if (adminUserId) {
+        appointmentData.created_by = adminUserId;
+      } else {
+        // Se não encontrar admin, criar um usuário sistema temporário
+        appointmentData.created_by = '00000000-0000-0000-0000-000000000000'; // UUID nulo
+        logger.warn('⚠️ No admin found, using system user', { 
+          companyId: appointmentData.company_id 
+        });
+      }
+    }
+
     const { data, error } = await supabase
       .from('appointments')
       .insert(appointmentData)
@@ -167,6 +205,46 @@ async function createAppointment(appointmentData) {
     return data;
   } catch (error) {
     logger.error('❌ Erro ao criar appointment:', error);
+    throw error;
+  }
+}
+
+/**
+ * Fazer upsert de appointment (criar ou atualizar)
+ */
+async function upsertAppointment(appointmentData) {
+  try {
+    // Se não tem created_by, buscar admin da empresa
+    if (!appointmentData.created_by) {
+      const adminUserId = await getCompanyAdminUser(appointmentData.company_id);
+      if (adminUserId) {
+        appointmentData.created_by = adminUserId;
+      } else {
+        appointmentData.created_by = '00000000-0000-0000-0000-000000000000';
+        logger.warn('⚠️ No admin found, using system user', { 
+          companyId: appointmentData.company_id 
+        });
+      }
+    }
+
+    // Tentar fazer upsert baseado no google_event_id
+    const { data, error } = await supabase
+      .from('appointments')
+      .upsert(appointmentData, {
+        onConflict: 'company_id,google_event_id',
+        ignoreDuplicates: false
+      })
+      .select('*')
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    logger.debug('✅ Upserted appointment', { appointmentId: data.id });
+    return data;
+  } catch (error) {
+    logger.error('❌ Erro ao fazer upsert do appointment:', error);
     throw error;
   }
 }
@@ -278,7 +356,9 @@ module.exports = {
   updateIntegrationSyncData,
   updateIntegrationTokens,
   markIntegrationAsError,
+  getCompanyAdminUser,
   createAppointment,
+  upsertAppointment,
   updateAppointment,
   getAppointmentByGoogleEventId,
   cancelAppointment,
