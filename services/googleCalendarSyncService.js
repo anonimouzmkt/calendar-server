@@ -12,9 +12,9 @@ const {
   updateAppointment,
   getAppointmentByGoogleEventId,
   cancelAppointment,
-  getOrphanAppointments,
+  getUnsyncedLocalAppointments,
   updateAppointmentWithGoogleEventId,
-  getAppointmentsWithGoogleEventId
+  getSyncedAppointments
 } = require('./supabaseService');
 
 // Configurações da API do Google Calendar
@@ -167,8 +167,8 @@ class GoogleCalendarSyncService {
    */
   async syncLocalAppointmentsToGoogle(integration, accessToken) {
     try {
-      // Buscar appointments que não tem google_event_id (órfãos)
-      const orphanAppointments = await getOrphanAppointments(
+      // Buscar appointments que não tem google_event_id (não sincronizados)
+      const orphanAppointments = await getUnsyncedLocalAppointments(
         integration.company_id, 
         integration.calendar_id
       );
@@ -326,6 +326,7 @@ class GoogleCalendarSyncService {
 
   /**
    * ✅ NOVO: Limpar appointments órfãos (deletados no Google Calendar)
+   * ÓRFÃOS = Appointments que TÊM google_event_id no banco mas foram DELETADOS no Google Calendar
    */
   async cleanupOrphanedAppointments(integration, accessToken) {
     try {
@@ -340,8 +341,8 @@ class GoogleCalendarSyncService {
         return;
       }
 
-      // Buscar appointments que têm google_event_id (podem estar órfãos)
-      const appointmentsWithGoogleId = await getAppointmentsWithGoogleEventId(
+      // Buscar appointments que têm google_event_id (podem estar órfãos se deletados no Google)
+      const appointmentsWithGoogleId = await getSyncedAppointments(
         integration.company_id, 
         integration.calendar_id
       );
@@ -354,11 +355,12 @@ class GoogleCalendarSyncService {
         return;
       }
 
-      logger.info(`🔍 Verificando ${appointmentsWithGoogleId.length} appointment(s) sincronizado(s) no Google Calendar`, {
+      logger.info(`🔍 Verificando órfãos: ${appointmentsWithGoogleId.length} appointment(s) sincronizado(s) vs Google Calendar`, {
         operation: 'ORPHAN_CLEANUP_START',
         appointmentsToCheck: appointmentsWithGoogleId.length,
         companyId: integration.company_id,
-        calendarName: integration.calendar_name || integration.calendar_id
+        calendarName: integration.calendar_name || integration.calendar_id,
+        explanation: 'Órfãos = appointments com google_event_id que foram deletados no Google Calendar'
       });
 
       let deletedCount = 0;
@@ -600,32 +602,32 @@ class GoogleCalendarSyncService {
       const eventTitle = googleEvent.summary || 'Evento sem título';
       const eventDate = googleEvent.start?.dateTime || googleEvent.start?.date || 'Data não definida';
       
-      if (googleEvent.status === 'cancelled') {
-        // Buscar e cancelar appointment se existir
-        const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
-        if (existingAppointment) {
-          await cancelAppointment(existingAppointment.id);
-          performanceMonitor.recordEventProcessing('cancelled');
-          logger.info('🚫 Evento CANCELADO no Google Calendar', { 
-            operation: 'CANCEL_FROM_GOOGLE',
-            eventId: googleEvent.id,
-            appointmentId: existingAppointment.id,
-            title: eventTitle,
-            originalTitle: existingAppointment.title,
-            eventDate: eventDate,
-            companyId
-          });
-        } else {
-          logger.debug('🚫 Evento cancelado no Google Calendar mas appointment não encontrado', {
-            operation: 'CANCEL_ORPHAN',
-            eventId: googleEvent.id,
-            title: eventTitle,
-            eventDate: eventDate,
-            companyId
-          });
+              if (googleEvent.status === 'cancelled') {
+          // Buscar e cancelar appointment se existir
+          const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
+          if (existingAppointment) {
+            await cancelAppointment(existingAppointment.id);
+            performanceMonitor.recordEventProcessing('cancelled');
+            logger.info('🚫 Evento CANCELADO no Google Calendar', { 
+              operation: 'CANCEL_FROM_GOOGLE',
+              eventId: googleEvent.id,
+              appointmentId: existingAppointment.id,
+              title: eventTitle,
+              originalTitle: existingAppointment.title,
+              eventDate: eventDate,
+              companyId
+            });
+          } else {
+            logger.debug('🚫 Evento cancelado no Google Calendar mas appointment não encontrado', {
+              operation: 'CANCEL_ORPHAN',
+              eventId: googleEvent.id,
+              title: eventTitle,
+              eventDate: eventDate,
+              companyId
+            });
+          }
+          return;
         }
-        return;
-      }
 
       // Para eventos ativos, usar upsert (criar ou atualizar automaticamente)
       await this.upsertAppointmentFromGoogleEvent(companyId, googleEvent);
@@ -644,10 +646,10 @@ class GoogleCalendarSyncService {
   /**
    * Fazer upsert de appointment baseado no evento do Google Calendar
    */
-  async upsertAppointmentFromGoogleEvent(companyId, googleEvent) {
-    // Verificar se já existe para determinar se é criação ou atualização
-    const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
-    const isUpdate = !!existingAppointment;
+      async upsertAppointmentFromGoogleEvent(companyId, googleEvent) {
+      // Verificar se já existe para determinar se é criação ou atualização
+      const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
+      const isUpdate = !!existingAppointment;
 
     const eventTitle = googleEvent.summary || 'Evento sem título';
     const eventDate = googleEvent.start?.dateTime || googleEvent.start?.date || 'Data não definida';
@@ -667,12 +669,12 @@ class GoogleCalendarSyncService {
       status: 'scheduled'
     };
 
-    // Se é atualização, manter o ID e created_by originais
-    if (isUpdate) {
-      appointmentData.id = existingAppointment.id;
-      appointmentData.created_by = existingAppointment.created_by;
-      appointmentData.created_at = existingAppointment.created_at;
-    }
+          // Se é atualização, manter o ID e created_by originais
+      if (isUpdate) {
+        appointmentData.id = existingAppointment.id;
+        appointmentData.created_by = existingAppointment.created_by;
+        appointmentData.created_at = existingAppointment.created_at;
+      }
     // Se é criação, o created_by será resolvido automaticamente no upsertAppointment
 
     await upsertAppointment(appointmentData);
