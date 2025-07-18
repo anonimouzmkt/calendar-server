@@ -11,7 +11,9 @@ const {
   upsertAppointment,
   updateAppointment,
   getAppointmentByGoogleEventId,
-  cancelAppointment
+  cancelAppointment,
+  getOrphanAppointments,
+  updateAppointmentWithGoogleEventId
 } = require('./supabaseService');
 
 // Configurações da API do Google Calendar
@@ -95,7 +97,7 @@ class GoogleCalendarSyncService {
   }
 
   /**
-   * Sincroniza uma integração específica
+   * Sincroniza uma integração específica (bidirecional)
    */
   async syncSingleIntegration(integration) {
     const startTime = Date.now();
@@ -107,24 +109,13 @@ class GoogleCalendarSyncService {
       // Verificar e renovar token se necessário
       const accessToken = await this.ensureValidToken(integration);
 
-      // Configurar parâmetros de sincronização
-      const syncParams = this.buildSyncParams(integration);
+      // ✅ NOVO: 1. Primeiro, sincronizar appointments locais órfãos para Google Calendar
+      logger.info('🔄 [1/2] Sincronizando appointments locais para Google Calendar...');
+      await this.syncLocalAppointmentsToGoogle(integration, accessToken);
 
-      // Fazer chamada para Google Calendar API com rate limiting
-      const eventsData = await this.fetchGoogleCalendarEvents(accessToken, integration.calendar_id, syncParams);
-
-      // Processar eventos retornados
-      for (const event of eventsData.items || []) {
-        await this.processGoogleEvent(integration.company_id, event);
-        eventsProcessed++;
-      }
-
-      // Atualizar sync token se fornecido
-      if (eventsData.nextSyncToken) {
-        await updateIntegrationSyncData(integration.id, {
-          sync_token: eventsData.nextSyncToken
-        });
-      }
+      // ✅ EXISTENTE: 2. Depois, sincronizar eventos do Google Calendar para banco local
+      logger.info('🔄 [2/2] Sincronizando eventos do Google Calendar para banco local...');
+      eventsProcessed = await this.syncGoogleEventsToLocal(integration, accessToken);
 
       const duration = Date.now() - startTime;
       logger.syncSuccess(integration.company_id, integration.id, eventsProcessed, duration);
@@ -136,6 +127,158 @@ class GoogleCalendarSyncService {
       logger.syncError(integration.company_id, integration.id, error);
       throw error;
     }
+  }
+
+  /**
+   * ✅ NOVO: Sincroniza appointments locais órfãos para Google Calendar
+   */
+  async syncLocalAppointmentsToGoogle(integration, accessToken) {
+    try {
+      // Buscar appointments que não tem google_event_id (órfãos)
+      const orphanAppointments = await getOrphanAppointments(
+        integration.company_id, 
+        integration.calendar_id
+      );
+      
+      if (orphanAppointments.length === 0) {
+        logger.debug('ℹ️ Nenhum appointment órfão encontrado', { 
+          companyId: integration.company_id,
+          calendarId: integration.calendar_id 
+        });
+        return;
+      }
+
+      logger.info(`📝 Encontrados ${orphanAppointments.length} appointment(s) órfão(s)`, {
+        companyId: integration.company_id
+      });
+
+      for (const appointment of orphanAppointments) {
+        try {
+          // Criar evento no Google Calendar
+          const googleEvent = await this.createGoogleEvent(appointment, integration, accessToken);
+          
+          // Atualizar appointment com google_event_id
+          await updateAppointmentWithGoogleEventId(
+            appointment.id, 
+            googleEvent.id,
+            googleEvent.conferenceData?.entryPoints?.[0]?.uri
+          );
+
+          performanceMonitor.recordEventProcessing('created_in_google');
+          logger.info(`✅ Appointment sincronizado para Google Calendar`, { 
+            appointmentId: appointment.id,
+            googleEventId: googleEvent.id,
+            title: appointment.title
+          });
+          
+        } catch (error) {
+          logger.error(`❌ Erro ao sincronizar appointment`, { 
+            appointmentId: appointment.id,
+            error: error.message 
+          });
+          performanceMonitor.recordError('sync_to_google', error);
+          // Continuar com os próximos appointments mesmo se um falhar
+        }
+      }
+    } catch (error) {
+      logger.error('❌ Erro na sincronização local → Google:', { error: error.message });
+      performanceMonitor.recordError('sync_to_google_batch', error);
+      // Não falhar a sincronização completa por causa deste erro
+    }
+  }
+
+  /**
+   * ✅ NOVO: Cria evento no Google Calendar baseado em appointment local
+   */
+  async createGoogleEvent(appointment, integration, accessToken) {
+    const googleEvent = {
+      summary: appointment.title,
+      description: appointment.description,
+      start: {
+        dateTime: appointment.start_time,
+        timeZone: integration.timezone
+      },
+      end: {
+        dateTime: appointment.end_time,
+        timeZone: integration.timezone
+      },
+      location: appointment.location,
+      attendees: appointment.attendees?.map(att => ({ email: att.email })) || []
+    };
+
+    // Adicionar Google Meet se a integração permite
+    if (integration.auto_create_meet) {
+      googleEvent.conferenceData = {
+        createRequest: {
+          requestId: `meet-${Date.now()}-${appointment.id}`,
+          conferenceSolutionKey: {
+            type: 'hangoutsMeet'
+          }
+        }
+      };
+    }
+
+    return rateLimiter.makeRequest(async () => {
+      return this.withRetry(async () => {
+        const url = `${GOOGLE_API_BASE_URL}/calendars/${integration.calendar_id}/events?conferenceDataVersion=1`;
+        
+        const apiStartTime = Date.now();
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(googleEvent)
+        });
+
+        const apiDuration = Date.now() - apiStartTime;
+        const success = response.ok;
+        
+        performanceMonitor.recordApiCall(apiDuration, success);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          const error = new Error(`Google Calendar API error: ${response.status} - ${errorText}`);
+          
+          if (response.status === 429) {
+            performanceMonitor.recordRateLimitHit();
+          }
+          
+          throw error;
+        }
+
+        return await response.json();
+      });
+    });
+  }
+
+  /**
+   * ✅ RENOMEADO: Sincroniza eventos do Google Calendar para banco local (função original)
+   */
+  async syncGoogleEventsToLocal(integration, accessToken) {
+    // Configurar parâmetros de sincronização
+    const syncParams = this.buildSyncParams(integration);
+
+    // Fazer chamada para Google Calendar API com rate limiting
+    const eventsData = await this.fetchGoogleCalendarEvents(accessToken, integration.calendar_id, syncParams);
+
+    let eventsProcessed = 0;
+
+    // Processar eventos retornados
+    for (const event of eventsData.items || []) {
+      await this.processGoogleEvent(integration.company_id, event);
+      eventsProcessed++;
+    }
+
+    // Atualizar sync token se fornecido
+    if (eventsData.nextSyncToken) {
+      await updateIntegrationSyncData(integration.id, {
+        sync_token: eventsData.nextSyncToken
+      });
+    }
+
+    return eventsProcessed;
   }
 
   /**
