@@ -351,9 +351,10 @@ async function testConnection() {
 }
 
 /**
- * ✅ NOVO: Buscar appointments órfãos (sem google_event_id)
+ * ✅ NOVO: Buscar appointments locais não sincronizados (sem google_event_id)
+ * Estes precisam ser criados no Google Calendar
  */
-async function getOrphanAppointments(companyId, googleCalendarId) {
+async function getUnsyncedLocalAppointments(companyId, googleCalendarId) {
   try {
     const { data, error } = await supabase
       .from('appointments')
@@ -367,7 +368,7 @@ async function getOrphanAppointments(companyId, googleCalendarId) {
     if (error) throw error;
     return data || [];
   } catch (error) {
-    logger.error('❌ Erro ao buscar appointments órfãos:', error);
+    logger.error('❌ Erro ao buscar appointments não sincronizados:', error);
     throw error;
   }
 }
@@ -404,9 +405,10 @@ async function updateAppointmentWithGoogleEventId(appointmentId, googleEventId, 
 }
 
 /**
- * ✅ NOVO: Buscar appointments que têm google_event_id (para verificar órfãos)
+ * ✅ NOVO: Buscar appointments sincronizados (com google_event_id)
+ * Estes podem estar órfãos se o evento foi deletado no Google Calendar
  */
-async function getAppointmentsWithGoogleEventId(companyId, googleCalendarId) {
+async function getSyncedAppointments(companyId, googleCalendarId) {
   try {
     const { data, error } = await supabase
       .from('appointments')
@@ -421,7 +423,7 @@ async function getAppointmentsWithGoogleEventId(companyId, googleCalendarId) {
     if (error) throw error;
     return data || [];
   } catch (error) {
-    logger.error('❌ Erro ao buscar appointments com google_event_id:', error);
+    logger.error('❌ Erro ao buscar appointments sincronizados:', error);
     throw error;
   }
 }
@@ -439,7 +441,7 @@ module.exports = {
   getAppointmentByGoogleEventId,
   cancelAppointment,
   testConnection,
-  getOrphanAppointments,
+  getUnsyncedLocalAppointments,
   updateAppointmentWithGoogleEventId,
-  getAppointmentsWithGoogleEventId
+  getSyncedAppointments
 }; 
