@@ -227,11 +227,11 @@ async function upsertAppointment(appointmentData) {
       }
     }
 
-    // Tentar fazer upsert baseado no google_event_id
+    // Tentar fazer upsert baseado na constraint única
     const { data, error } = await supabase
       .from('appointments')
       .upsert(appointmentData, {
-        onConflict: 'company_id,google_event_id',
+        onConflict: 'unique_appointment_per_google_event',
         ignoreDuplicates: false
       })
       .select('*')
