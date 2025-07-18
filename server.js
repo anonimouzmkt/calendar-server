@@ -13,14 +13,15 @@ const GoogleCalendarSyncService = require('./services/googleCalendarSyncService'
 // 🔧 CONFIGURAÇÃO
 // =====================================
 
-const POLLING_INTERVAL = parseInt(process.env.POLLING_INTERVAL_MINUTES || '1');
+// ✅ NOVO: Suporte a segundos para polling mais frequente
+const POLLING_INTERVAL_SECONDS = parseInt(process.env.POLLING_INTERVAL_SECONDS || '60');
 const PORT = parseInt(process.env.PORT || '3002');
 const HEALTH_CHECK_PORT = parseInt(process.env.HEALTH_CHECK_PORT || '3003');
 const ENABLE_HEALTH_CHECK = process.env.ENABLE_HEALTH_CHECK === 'true';
 
 // Validar configuração
-if (POLLING_INTERVAL < 1 || POLLING_INTERVAL > 60) {
-  logger.error('❌ POLLING_INTERVAL_MINUTES deve estar entre 1 e 60 minutos');
+if (POLLING_INTERVAL_SECONDS < 5 || POLLING_INTERVAL_SECONDS > 3600) {
+  logger.error('❌ POLLING_INTERVAL_SECONDS deve estar entre 5 segundos e 3600 segundos (1 hora)');
   process.exit(1);
 }
 
@@ -93,7 +94,7 @@ function createHealthCheckServer() {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         polling: {
-          interval: `${POLLING_INTERVAL} minute(s)`,
+          interval: `${POLLING_INTERVAL_SECONDS} second(s)`,
           isRunning,
           lastSyncTime,
           stats: syncStats
@@ -131,10 +132,21 @@ function createHealthCheckServer() {
 // =====================================
 
 function setupCronJob() {
-  // Expressão cron para executar a cada X minutos
-  const cronExpression = `*/${POLLING_INTERVAL} * * * *`;
+  let cronExpression;
+  let intervalDescription;
+
+  if (POLLING_INTERVAL_SECONDS >= 60) {
+    // Intervalo em minutos (para intervalos >= 60 segundos)
+    const intervalMinutes = Math.floor(POLLING_INTERVAL_SECONDS / 60);
+    cronExpression = `*/${intervalMinutes} * * * *`;
+    intervalDescription = `${intervalMinutes} minute(s)`;
+  } else {
+    // Intervalo em segundos (para intervalos < 60 segundos)
+    cronExpression = `*/${POLLING_INTERVAL_SECONDS} * * * * *`;
+    intervalDescription = `${POLLING_INTERVAL_SECONDS} second(s)`;
+  }
   
-  logger.info(`⏰ Setting up cron job with interval: ${POLLING_INTERVAL} minute(s)`);
+  logger.info(`⏰ Setting up cron job with interval: ${intervalDescription}`);
   logger.info(`   → Cron expression: ${cronExpression}`);
   
   const task = cron.schedule(cronExpression, performSync, {
@@ -201,7 +213,7 @@ async function startServer() {
   try {
     logger.info('🚀 Starting Calendar Sync Server...');
     logger.info(`📅 Environment: ${process.env.NODE_ENV || 'development'}`);
-    logger.info(`⏰ Polling interval: ${POLLING_INTERVAL} minute(s)`);
+    logger.info(`⏰ Polling interval: ${POLLING_INTERVAL_SECONDS} second(s)`);
     
     // Testar conexão com Supabase
     logger.info('🔍 Testing Supabase connection...');
@@ -249,7 +261,7 @@ async function startServer() {
     
     logger.info('🎉 Calendar Sync Server is running!');
     logger.info('───────────────────────────────────────');
-    logger.info(`⏰ Next sync in: ${POLLING_INTERVAL} minute(s)`);
+    logger.info(`⏰ Next sync in: ${POLLING_INTERVAL_SECONDS} second(s)`);
     
     if (ENABLE_HEALTH_CHECK) {
       logger.info(`🏥 Health check: http://localhost:${HEALTH_CHECK_PORT}/health`);
