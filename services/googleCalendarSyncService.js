@@ -104,7 +104,14 @@ class GoogleCalendarSyncService {
     const startTime = Date.now();
     let eventsProcessed = 0;
 
-    logger.syncStart(integration.company_id, integration.id);
+    logger.info('🚀 Iniciando sincronização BIDIRECIONAL', {
+      operation: 'SYNC_START',
+      companyId: integration.company_id,
+      integrationId: integration.id,
+      calendarName: integration.calendar_name || integration.calendar_id,
+      status: integration.status,
+      syncEnabled: integration.sync_enabled
+    });
 
     try {
       // Verificar e renovar token se necessário
@@ -123,13 +130,34 @@ class GoogleCalendarSyncService {
       await this.cleanupOrphanedAppointments(integration, accessToken);
 
       const duration = Date.now() - startTime;
-      logger.syncSuccess(integration.company_id, integration.id, eventsProcessed, duration);
+      logger.info('🎉 Sincronização BIDIRECIONAL CONCLUÍDA com sucesso', {
+        operation: 'SYNC_COMPLETE',
+        companyId: integration.company_id,
+        integrationId: integration.id,
+        calendarName: integration.calendar_name || integration.calendar_id,
+        eventsProcessed: eventsProcessed,
+        duration: `${duration}ms`,
+        phases: {
+          'phase1': 'Appointments locais → Google Calendar',
+          'phase2': 'Google Calendar → Banco local',
+          'phase3': 'Cleanup de órfãos (deletados no Google)'
+        }
+      });
       
       return eventsProcessed;
 
     } catch (error) {
       const duration = Date.now() - startTime;
-      logger.syncError(integration.company_id, integration.id, error);
+      logger.error('💥 ERRO na sincronização bidirecional', {
+        operation: 'SYNC_ERROR',
+        companyId: integration.company_id,
+        integrationId: integration.id,
+        calendarName: integration.calendar_name || integration.calendar_id,
+        duration: `${duration}ms`,
+        error: error.message,
+        errorType: error.name,
+        phase: 'Unknown - Erro antes de completar fases'
+      });
       throw error;
     }
   }
@@ -146,15 +174,19 @@ class GoogleCalendarSyncService {
       );
       
       if (orphanAppointments.length === 0) {
-        logger.debug('ℹ️ Nenhum appointment órfão encontrado', { 
+        logger.info('✅ Nenhum appointment órfão local encontrado (todos já sincronizados)', { 
+          operation: 'SYNC_LOCAL_TO_GOOGLE_COMPLETE',
           companyId: integration.company_id,
           calendarId: integration.calendar_id 
         });
         return;
       }
 
-      logger.info(`📝 Encontrados ${orphanAppointments.length} appointment(s) órfão(s)`, {
-        companyId: integration.company_id
+      logger.info(`📝 Encontrados ${orphanAppointments.length} appointment(s) local(is) NÃO sincronizado(s)`, {
+        operation: 'SYNC_LOCAL_TO_GOOGLE_START',
+        orphanCount: orphanAppointments.length,
+        companyId: integration.company_id,
+        calendarName: integration.calendar_name || integration.calendar_id
       });
 
       for (const appointment of orphanAppointments) {
@@ -170,10 +202,16 @@ class GoogleCalendarSyncService {
           );
 
           performanceMonitor.recordEventProcessing('created_in_google');
-          logger.info(`✅ Appointment sincronizado para Google Calendar`, { 
+          logger.info(`🔄 Appointment LOCAL enviado para Google Calendar`, { 
+            operation: 'SYNC_TO_GOOGLE',
             appointmentId: appointment.id,
             googleEventId: googleEvent.id,
-            title: appointment.title
+            title: appointment.title,
+            eventDate: appointment.start_time,
+            location: appointment.location || 'Sem localização',
+            hasMeet: !!googleEvent.conferenceData?.entryPoints?.[0]?.uri,
+            attendeesCount: appointment.attendees?.length || 0,
+            companyId: integration.company_id
           });
           
         } catch (error) {
@@ -295,7 +333,10 @@ class GoogleCalendarSyncService {
       const shouldRunCleanup = Math.random() < 0.1; // 10% de chance a cada sync
       
       if (!shouldRunCleanup) {
-        logger.debug('⏭️ Pulando cleanup de órfãos neste ciclo');
+        logger.info('⏭️ Pulando cleanup de órfãos neste ciclo (otimização - executa ~10% das vezes)', {
+          operation: 'ORPHAN_CLEANUP_SKIPPED',
+          companyId: integration.company_id
+        });
         return;
       }
 
@@ -306,12 +347,18 @@ class GoogleCalendarSyncService {
       );
       
       if (appointmentsWithGoogleId.length === 0) {
-        logger.debug('ℹ️ Nenhum appointment com google_event_id encontrado');
+        logger.info('✅ Nenhum appointment sincronizado encontrado para verificar órfãos', {
+          operation: 'ORPHAN_CLEANUP_COMPLETE',
+          companyId: integration.company_id
+        });
         return;
       }
 
-      logger.info(`🔍 Verificando ${appointmentsWithGoogleId.length} appointment(s) no Google Calendar`, {
-        companyId: integration.company_id
+      logger.info(`🔍 Verificando ${appointmentsWithGoogleId.length} appointment(s) sincronizado(s) no Google Calendar`, {
+        operation: 'ORPHAN_CLEANUP_START',
+        appointmentsToCheck: appointmentsWithGoogleId.length,
+        companyId: integration.company_id,
+        calendarName: integration.calendar_name || integration.calendar_id
       });
 
       let deletedCount = 0;
@@ -331,10 +378,14 @@ class GoogleCalendarSyncService {
             await cancelAppointment(appointment.id);
             deletedCount++;
             
-            logger.info(`🗑️ Appointment órfão cancelado`, { 
+            logger.info(`🗑️ Appointment ÓRFÃO cancelado (deletado do Google Calendar)`, { 
+              operation: 'ORPHAN_CLEANUP',
               appointmentId: appointment.id,
               googleEventId: appointment.google_event_id,
-              title: appointment.title
+              title: appointment.title,
+              createdAt: appointment.created_at,
+              reason: 'Evento não existe mais no Google Calendar (404/410)',
+              companyId: integration.company_id
             });
             
             performanceMonitor.recordEventProcessing('orphan_cleaned');
@@ -351,9 +402,19 @@ class GoogleCalendarSyncService {
       }
 
       if (deletedCount > 0) {
-        logger.info(`✅ Limpeza concluída: ${deletedCount} appointment(s) órfão(s) cancelado(s)`);
+        logger.info(`✅ Cleanup de órfãos CONCLUÍDO: ${deletedCount} appointment(s) órfão(s) cancelado(s)`, {
+          operation: 'ORPHAN_CLEANUP_COMPLETE',
+          orphansFound: deletedCount,
+          appointmentsChecked: appointmentsWithGoogleId.length,
+          companyId: integration.company_id
+        });
       } else {
-        logger.debug('✅ Nenhum appointment órfão encontrado');
+        logger.info(`✅ Cleanup de órfãos CONCLUÍDO: Todos os appointments estão sincronizados corretamente`, {
+          operation: 'ORPHAN_CLEANUP_COMPLETE',
+          orphansFound: 0,
+          appointmentsChecked: appointmentsWithGoogleId.length,
+          companyId: integration.company_id
+        });
       }
       
     } catch (error) {
@@ -536,15 +597,31 @@ class GoogleCalendarSyncService {
    */
   async processGoogleEvent(companyId, googleEvent) {
     try {
+      const eventTitle = googleEvent.summary || 'Evento sem título';
+      const eventDate = googleEvent.start?.dateTime || googleEvent.start?.date || 'Data não definida';
+      
       if (googleEvent.status === 'cancelled') {
         // Buscar e cancelar appointment se existir
         const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
         if (existingAppointment) {
           await cancelAppointment(existingAppointment.id);
           performanceMonitor.recordEventProcessing('cancelled');
-          logger.debug('📅 Cancelled appointment from Google event', { 
-            eventId: googleEvent.id, 
-            appointmentId: existingAppointment.id 
+          logger.info('🚫 Evento CANCELADO no Google Calendar', { 
+            operation: 'CANCEL_FROM_GOOGLE',
+            eventId: googleEvent.id,
+            appointmentId: existingAppointment.id,
+            title: eventTitle,
+            originalTitle: existingAppointment.title,
+            eventDate: eventDate,
+            companyId
+          });
+        } else {
+          logger.debug('🚫 Evento cancelado no Google Calendar mas appointment não encontrado', {
+            operation: 'CANCEL_ORPHAN',
+            eventId: googleEvent.id,
+            title: eventTitle,
+            eventDate: eventDate,
+            companyId
           });
         }
         return;
@@ -554,8 +631,10 @@ class GoogleCalendarSyncService {
       await this.upsertAppointmentFromGoogleEvent(companyId, googleEvent);
       
     } catch (error) {
-      logger.error('❌ Error processing Google event', { 
-        eventId: googleEvent.id, 
+      logger.error('❌ Erro ao processar evento do Google Calendar', { 
+        operation: 'PROCESS_GOOGLE_EVENT_ERROR',
+        eventId: googleEvent.id,
+        title: googleEvent.summary || 'Evento sem título',
         companyId, 
         error: error.message 
       });
@@ -570,9 +649,12 @@ class GoogleCalendarSyncService {
     const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
     const isUpdate = !!existingAppointment;
 
+    const eventTitle = googleEvent.summary || 'Evento sem título';
+    const eventDate = googleEvent.start?.dateTime || googleEvent.start?.date || 'Data não definida';
+
     const appointmentData = {
       company_id: companyId,
-      title: googleEvent.summary || 'Evento sem título',
+      title: eventTitle,
       description: googleEvent.description,
       start_time: googleEvent.start.dateTime || googleEvent.start.date,
       end_time: googleEvent.end.dateTime || googleEvent.end.date,
@@ -598,11 +680,60 @@ class GoogleCalendarSyncService {
     // Registrar métrica apropriada
     performanceMonitor.recordEventProcessing(isUpdate ? 'updated' : 'created');
     
-    logger.debug(`📅 ${isUpdate ? 'Updated' : 'Created'} appointment from Google event`, { 
-      eventId: googleEvent.id,
-      appointmentId: appointmentData.id,
-      isUpdate
-    });
+    if (isUpdate) {
+      // Log detalhado para atualizações
+      const changes = this.detectChanges(existingAppointment, appointmentData);
+      logger.info(`📝 Evento ATUALIZADO do Google Calendar`, { 
+        operation: 'UPDATE_FROM_GOOGLE',
+        eventId: googleEvent.id,
+        appointmentId: appointmentData.id,
+        title: eventTitle,
+        eventDate: eventDate,
+        changes: changes,
+        companyId
+      });
+    } else {
+      // Log para criações
+      logger.info(`📅 Novo evento CRIADO do Google Calendar`, { 
+        operation: 'CREATE_FROM_GOOGLE',
+        eventId: googleEvent.id,
+        appointmentId: appointmentData.id,
+        title: eventTitle,
+        eventDate: eventDate,
+        location: googleEvent.location || 'Sem localização',
+        hasMeet: !!googleEvent.conferenceData?.entryPoints?.[0]?.uri,
+        attendeesCount: this.parseAttendees(googleEvent.attendees).length,
+        companyId
+      });
+    }
+  }
+
+  /**
+   * ✅ NOVO: Detectar mudanças entre appointment existente e novo dados
+   */
+  detectChanges(existing, updated) {
+    const changes = [];
+    
+    if (existing.title !== updated.title) {
+      changes.push(`título: "${existing.title}" → "${updated.title}"`);
+    }
+    if (existing.start_time !== updated.start_time) {
+      changes.push(`início: ${existing.start_time} → ${updated.start_time}`);
+    }
+    if (existing.end_time !== updated.end_time) {
+      changes.push(`fim: ${existing.end_time} → ${updated.end_time}`);
+    }
+    if (existing.location !== updated.location) {
+      changes.push(`local: "${existing.location || 'Vazio'}" → "${updated.location || 'Vazio'}"`);
+    }
+    if (existing.description !== updated.description) {
+      changes.push(`descrição: Modificada`);
+    }
+    if (existing.google_meet_link !== updated.google_meet_link) {
+      changes.push(`meet: ${existing.google_meet_link ? 'Tinha' : 'Não tinha'} → ${updated.google_meet_link ? 'Tem' : 'Não tem'}`);
+    }
+    
+    return changes.length > 0 ? changes : ['Mudanças detectadas mas não identificadas'];
   }
 
   /**
