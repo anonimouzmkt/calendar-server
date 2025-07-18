@@ -6,7 +6,9 @@ const {
   updateIntegrationSyncData,
   updateIntegrationTokens,
   markIntegrationAsError,
+  getCompanyAdminUser,
   createAppointment,
+  upsertAppointment,
   updateAppointment,
   getAppointmentByGoogleEventId,
   cancelAppointment
@@ -265,11 +267,9 @@ class GoogleCalendarSyncService {
    */
   async processGoogleEvent(companyId, googleEvent) {
     try {
-      // Verificar se appointment já existe
-      const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
-
       if (googleEvent.status === 'cancelled') {
-        // Cancelar appointment se existir
+        // Buscar e cancelar appointment se existir
+        const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
         if (existingAppointment) {
           await cancelAppointment(existingAppointment.id);
           performanceMonitor.recordEventProcessing('cancelled');
@@ -281,13 +281,9 @@ class GoogleCalendarSyncService {
         return;
       }
 
-      if (existingAppointment) {
-        // Atualizar appointment existente
-        await this.updateExistingAppointment(existingAppointment, googleEvent);
-      } else {
-        // Criar novo appointment (evento criado fora do sistema)
-        await this.createNewAppointment(companyId, googleEvent);
-      }
+      // Para eventos ativos, usar upsert (criar ou atualizar automaticamente)
+      await this.upsertAppointmentFromGoogleEvent(companyId, googleEvent);
+      
     } catch (error) {
       logger.error('❌ Error processing Google event', { 
         eventId: googleEvent.id, 
@@ -298,38 +294,15 @@ class GoogleCalendarSyncService {
   }
 
   /**
-   * Atualizar appointment existente
+   * Fazer upsert de appointment baseado no evento do Google Calendar
    */
-  async updateExistingAppointment(appointment, googleEvent) {
-    const updates = {
-      title: googleEvent.summary,
-      description: googleEvent.description,
-      start_time: googleEvent.start.dateTime || googleEvent.start.date,
-      end_time: googleEvent.end.dateTime || googleEvent.end.date,
-      location: googleEvent.location,
-      google_meet_link: googleEvent.conferenceData?.entryPoints?.[0]?.uri,
-      attendees: this.parseAttendees(googleEvent.attendees),
-      all_day: !googleEvent.start.dateTime // All-day se não tem dateTime
-    };
+  async upsertAppointmentFromGoogleEvent(companyId, googleEvent) {
+    // Verificar se já existe para determinar se é criação ou atualização
+    const existingAppointment = await getAppointmentByGoogleEventId(companyId, googleEvent.id);
+    const isUpdate = !!existingAppointment;
 
-    await updateAppointment(appointment.id, updates);
-    performanceMonitor.recordEventProcessing('updated');
-    
-    logger.debug('📅 Updated appointment from Google event', { 
-      eventId: googleEvent.id, 
-      appointmentId: appointment.id 
-    });
-  }
-
-  /**
-   * Criar novo appointment
-   */
-  async createNewAppointment(companyId, googleEvent) {
-    // Para eventos criados externamente, precisamos definir um usuário padrão
-    // Aqui podemos buscar o admin/owner da empresa ou usar um usuário sistema
     const appointmentData = {
       company_id: companyId,
-      created_by: null, // Será tratado por trigger no banco
       title: googleEvent.summary || 'Evento sem título',
       description: googleEvent.description,
       start_time: googleEvent.start.dateTime || googleEvent.start.date,
@@ -343,11 +316,23 @@ class GoogleCalendarSyncService {
       status: 'scheduled'
     };
 
-    await createAppointment(appointmentData);
-    performanceMonitor.recordEventProcessing('created');
+    // Se é atualização, manter o ID e created_by originais
+    if (isUpdate) {
+      appointmentData.id = existingAppointment.id;
+      appointmentData.created_by = existingAppointment.created_by;
+      appointmentData.created_at = existingAppointment.created_at;
+    }
+    // Se é criação, o created_by será resolvido automaticamente no upsertAppointment
+
+    await upsertAppointment(appointmentData);
     
-    logger.debug('📅 Created appointment from Google event', { 
-      eventId: googleEvent.id 
+    // Registrar métrica apropriada
+    performanceMonitor.recordEventProcessing(isUpdate ? 'updated' : 'created');
+    
+    logger.debug(`📅 ${isUpdate ? 'Updated' : 'Created'} appointment from Google event`, { 
+      eventId: googleEvent.id,
+      appointmentId: appointmentData.id,
+      isUpdate
     });
   }
 
