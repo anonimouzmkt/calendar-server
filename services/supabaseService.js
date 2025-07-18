@@ -231,7 +231,7 @@ async function upsertAppointment(appointmentData) {
     const { data, error } = await supabase
       .from('appointments')
       .upsert(appointmentData, {
-        onConflict: 'unique_appointment_per_google_event',
+        onConflict: 'company_id,google_event_id',
         ignoreDuplicates: false
       })
       .select('*')
