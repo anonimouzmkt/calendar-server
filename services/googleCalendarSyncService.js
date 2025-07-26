@@ -127,7 +127,8 @@ class GoogleCalendarSyncService {
 
       // ✅ NOVO: 3. Por último, verificar e limpar appointments órfãos (deletados no Google)
       logger.info('🔄 [3/3] Verificando appointments órfãos (deletados no Google Calendar)...');
-      await this.cleanupOrphanedAppointments(integration, accessToken);
+      const { deletedCount, updatedCount } = await this.cleanupOrphanedAppointments(integration, accessToken);
+      eventsProcessed += deletedCount + updatedCount; // Adicionar ao total de eventos processados
 
       const duration = Date.now() - startTime;
       logger.info('🎉 Sincronização BIDIRECIONAL CONCLUÍDA com sucesso', {
@@ -136,12 +137,17 @@ class GoogleCalendarSyncService {
         integrationId: integration.id,
         calendarName: integration.calendar_name || integration.calendar_id,
         eventsProcessed: eventsProcessed,
+        bidirectionalResults: {
+          orphansDeleted: deletedCount,
+          appointmentsUpdated: updatedCount
+        },
         duration: `${duration}ms`,
         phases: {
           'phase1': 'Appointments locais → Google Calendar',
           'phase2': 'Google Calendar → Banco local',
-          'phase3': 'Cleanup de órfãos (deletados no Google)'
-        }
+          'phase3': `Cleanup de órfãos: ${deletedCount} deletados, ${updatedCount} atualizados`
+        },
+        summary: `${eventsProcessed} eventos processados, ${deletedCount} órfãos removidos, ${updatedCount} atualizados`
       });
       
       return eventsProcessed;
@@ -325,22 +331,19 @@ class GoogleCalendarSyncService {
   }
 
   /**
-   * ✅ NOVO: Limpar appointments órfãos (deletados no Google Calendar)
+   * ✅ MELHORADO: Limpar appointments órfãos (deletados no Google Calendar)
    * ÓRFÃOS = Appointments que TÊM google_event_id no banco mas foram DELETADOS no Google Calendar
    */
   async cleanupOrphanedAppointments(integration, accessToken) {
-    try {
-      // Só fazer cleanup a cada 10 syncs para não sobrecarregar a API
-      const shouldRunCleanup = Math.random() < 0.1; // 10% de chance a cada sync
-      
-      if (!shouldRunCleanup) {
-        logger.info('⏭️ Pulando cleanup de órfãos neste ciclo (otimização - executa ~10% das vezes)', {
-          operation: 'ORPHAN_CLEANUP_SKIPPED',
-          companyId: integration.company_id
-        });
-        return;
-      }
+    const cleanupStartTime = Date.now();
+    let checkedCount = 0;
+    let deletedCount = 0;
+    let updatedCount = 0;
 
+    try {
+      // ✅ MUDANÇA: Executar sempre (removendo a otimização de 10%)
+      // O cleanup bidirecional é essencial para manter consistência
+      
       // Buscar appointments que têm google_event_id (podem estar órfãos se deletados no Google)
       const appointmentsWithGoogleId = await getSyncedAppointments(
         integration.company_id, 
@@ -350,12 +353,13 @@ class GoogleCalendarSyncService {
       if (appointmentsWithGoogleId.length === 0) {
         logger.info('✅ Nenhum appointment sincronizado encontrado para verificar órfãos', {
           operation: 'ORPHAN_CLEANUP_COMPLETE',
-          companyId: integration.company_id
+          companyId: integration.company_id,
+          duration: `${Date.now() - cleanupStartTime}ms`
         });
-        return;
+        return { checkedCount: 0, deletedCount: 0, updatedCount: 0 };
       }
 
-      logger.info(`🔍 Verificando órfãos: ${appointmentsWithGoogleId.length} appointment(s) sincronizado(s) vs Google Calendar`, {
+      logger.info(`🔍 [SYNC BIDIRECIONAL] Verificando órfãos: ${appointmentsWithGoogleId.length} appointment(s) vs Google Calendar`, {
         operation: 'ORPHAN_CLEANUP_START',
         appointmentsToCheck: appointmentsWithGoogleId.length,
         companyId: integration.company_id,
@@ -363,35 +367,54 @@ class GoogleCalendarSyncService {
         explanation: 'Órfãos = appointments com google_event_id que foram deletados no Google Calendar'
       });
 
-      let deletedCount = 0;
-
-      // Verificar cada appointment no Google Calendar
+      // ✅ MELHORADO: Verificar cada appointment no Google Calendar com mais detalhes
       for (const appointment of appointmentsWithGoogleId) {
         try {
-          // Tentar buscar o evento no Google Calendar usando a agenda específica do appointment
-          const eventExists = await this.checkGoogleEventExists(
+          checkedCount++;
+          
+          // Verificar se evento ainda existe no Google Calendar
+          const eventResult = await this.checkGoogleEventExistsDetailed(
             appointment.google_event_id, 
             appointment.google_calendar_id || integration.calendar_id, 
             accessToken
           );
           
-          if (!eventExists) {
-            // Evento não existe mais no Google Calendar - cancelar appointment
+          if (!eventResult.exists) {
+            // ✅ DELETAR: Cancelar appointment órfão (evento não existe mais no Google)
             await cancelAppointment(appointment.id);
             deletedCount++;
             
-            logger.info(`🗑️ Appointment ÓRFÃO cancelado (deletado do Google Calendar)`, { 
-              operation: 'ORPHAN_CLEANUP',
+            logger.info(`🗑️ [SYNC BIDIRECIONAL] Appointment ÓRFÃO cancelado (deletado do Google Calendar)`, { 
+              operation: 'ORPHAN_DELETED',
               appointmentId: appointment.id,
               googleEventId: appointment.google_event_id,
               googleCalendarId: appointment.google_calendar_id,
               title: appointment.title,
-              createdAt: appointment.created_at,
-              reason: 'Evento não existe mais no Google Calendar (404/410)',
+              eventDate: appointment.start_time,
+              reason: eventResult.reason || 'Evento não existe mais no Google Calendar',
               companyId: integration.company_id
             });
             
             performanceMonitor.recordEventProcessing('orphan_cleaned');
+          } else if (eventResult.event) {
+            // ✅ NOVO: Se evento existe mas foi modificado, atualizar dados locais
+            const hasChanges = await this.updateAppointmentFromGoogleEvent(appointment, eventResult.event);
+            if (hasChanges) {
+              updatedCount++;
+              logger.info(`🔄 [SYNC BIDIRECIONAL] Appointment atualizado com dados do Google`, {
+                operation: 'ORPHAN_UPDATED',
+                appointmentId: appointment.id,
+                googleEventId: appointment.google_event_id,
+                title: appointment.title,
+                companyId: integration.company_id
+              });
+              performanceMonitor.recordEventProcessing('bidirectional_updated');
+            }
+          }
+          
+          // ✅ MELHORADO: Rate limiting mais inteligente
+          if (checkedCount % 5 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 100)); // Pausa de 100ms a cada 5 verificações
           }
           
         } catch (error) {
@@ -405,26 +428,42 @@ class GoogleCalendarSyncService {
         }
       }
 
-      if (deletedCount > 0) {
-        logger.info(`✅ Cleanup de órfãos CONCLUÍDO: ${deletedCount} appointment(s) órfão(s) cancelado(s)`, {
+      const cleanupDuration = Date.now() - cleanupStartTime;
+
+      if (deletedCount > 0 || updatedCount > 0) {
+        logger.info(`✅ [SYNC BIDIRECIONAL] Cleanup CONCLUÍDO com alterações`, {
           operation: 'ORPHAN_CLEANUP_COMPLETE',
-          orphansFound: deletedCount,
-          appointmentsChecked: appointmentsWithGoogleId.length,
-          companyId: integration.company_id
+          orphansDeleted: deletedCount,
+          appointmentsUpdated: updatedCount,
+          appointmentsChecked: checkedCount,
+          duration: `${cleanupDuration}ms`,
+          companyId: integration.company_id,
+          summary: `${deletedCount} deletados, ${updatedCount} atualizados de ${checkedCount} verificados`
         });
       } else {
-        logger.info(`✅ Cleanup de órfãos CONCLUÍDO: Todos os appointments estão sincronizados corretamente`, {
+        logger.info(`✅ [SYNC BIDIRECIONAL] Cleanup CONCLUÍDO - Tudo sincronizado`, {
           operation: 'ORPHAN_CLEANUP_COMPLETE',
-          orphansFound: 0,
-          appointmentsChecked: appointmentsWithGoogleId.length,
+          orphansDeleted: 0,
+          appointmentsUpdated: 0,
+          appointmentsChecked: checkedCount,
+          duration: `${cleanupDuration}ms`,
           companyId: integration.company_id
         });
       }
+
+      return { checkedCount, deletedCount, updatedCount };
       
     } catch (error) {
-      logger.error('❌ Erro na limpeza de appointments órfãos:', { error: error.message });
+      const cleanupDuration = Date.now() - cleanupStartTime;
+      logger.error('❌ [SYNC BIDIRECIONAL] Erro na limpeza de appointments órfãos', { 
+        error: error.message,
+        duration: `${cleanupDuration}ms`,
+        companyId: integration.company_id
+      });
       performanceMonitor.recordError('orphan_cleanup', error);
-      // Não falhar a sincronização por causa deste erro
+      
+      // Retornar dados parciais em caso de erro
+      return { checkedCount, deletedCount, updatedCount };
     }
   }
 
@@ -468,6 +507,89 @@ class GoogleCalendarSyncService {
       });
     });
   }
+
+  /**
+   * ✅ NOVO: Verificar se evento ainda existe no Google Calendar com mais detalhes
+   */
+  async checkGoogleEventExistsDetailed(googleEventId, calendarId, accessToken) {
+    return rateLimiter.makeRequest(async () => {
+      return this.withRetry(async () => {
+        const url = `${GOOGLE_API_BASE_URL}/calendars/${calendarId}/events/${googleEventId}`;
+        
+        const apiStartTime = Date.now();
+        const response = await fetch(url, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+          }
+        });
+
+        const apiDuration = Date.now() - apiStartTime;
+        const success = response.ok;
+        
+        performanceMonitor.recordApiCall(apiDuration, success);
+
+        if (response.status === 404) {
+          return { exists: false, reason: '404 - Not Found' };
+        }
+        
+        if (response.status === 410) {
+          return { exists: false, reason: '410 - Gone' };
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Google Calendar API error: ${response.status} - ${errorText}`);
+        }
+
+        // Se chegou aqui, evento ainda existe
+        return { exists: true, event: await response.json() };
+      });
+    });
+  }
+
+  
+
+     /**
+    * ✅ NOVO: Atualizar dados do appointment local com base no evento do Google Calendar
+    */
+   async updateAppointmentFromGoogleEvent(appointment, googleEvent) {
+     let hasChanges = false;
+     const updates = {};
+
+     // Comparar e identificar mudanças
+     if (appointment.title !== googleEvent.summary) {
+       updates.title = googleEvent.summary || appointment.title;
+       hasChanges = true;
+     }
+     if (appointment.start_time !== googleEvent.start?.dateTime) {
+       updates.start_time = googleEvent.start?.dateTime || appointment.start_time;
+       hasChanges = true;
+     }
+     if (appointment.end_time !== googleEvent.end?.dateTime) {
+       updates.end_time = googleEvent.end?.dateTime || appointment.end_time;
+       hasChanges = true;
+     }
+     if (appointment.location !== googleEvent.location) {
+       updates.location = googleEvent.location;
+       hasChanges = true;
+     }
+     if (appointment.description !== googleEvent.description) {
+       updates.description = googleEvent.description;
+       hasChanges = true;
+     }
+     const newMeetLink = googleEvent.conferenceData?.entryPoints?.[0]?.uri;
+     if (appointment.google_meet_link !== newMeetLink) {
+       updates.google_meet_link = newMeetLink;
+       hasChanges = true;
+     }
+
+     // Se houver mudanças, atualizar
+     if (hasChanges) {
+       await updateAppointment(appointment.id, updates);
+       return true;
+     }
+     return false;
+   }
 
   /**
    * Garantir que o token está válido, renovando se necessário
